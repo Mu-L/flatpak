@@ -42,8 +42,12 @@ jobs:
     steps:
     - name: Install Dependencies
       run: |
+        head -v -n-0 /etc/apt/sources.list || :
+        head -v -n-0 /etc/apt/sources.list.d/* || :
+        # Workaround for https://github.com/orgs/community/discussions/120966
+        sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
         sudo apt-get update
-        sudo apt-get install -y libglib2.0-dev attr automake gettext autopoint bison  dbus gtk-doc-tools \
+        sudo apt-get install -y libglib2.0-dev attr gettext bison  dbus gtk-doc-tools \
         libfuse3-dev ostree libostree-dev libarchive-dev libzstd-dev libcap-dev libattr1-dev libdw-dev libelf-dev python3-pyparsing \
         libjson-glib-dev shared-mime-info desktop-file-utils libpolkit-agent-1-dev libpolkit-gobject-1-dev \
         libseccomp-dev libsoup2.4-dev libcurl4-openssl-dev libsystemd-dev libxml2-utils libgpgme11-dev gobject-introspection \
@@ -61,8 +65,8 @@ jobs:
         git clone --branch v0.15.4 --depth 1 --no-tags https://github.com/ximion/appstream.git ./appstream
         pushd ./appstream
         meson setup --prefix=/usr _build
-        ninja -C _build
-        sudo ninja -C _build install
+        meson compile -C _build
+        sudo meson install -C _build
         popd
     - name: Create logs dir
       run: mkdir test-logs
@@ -70,18 +74,18 @@ jobs:
       # We don't do gtk-doc or GObject-Introspection here, because they can
       # clash with AddressSanitizer. Instead, the clang build enables those.
       run: |
-        meson _build \
+        meson setup \
           -Db_sanitize=address,undefined \
           -Dgir=disabled \
           -Dgtkdoc=disabled \
           -Dhttp_backend=curl \
           -Dinternal_checks=true \
           -Dsystem_dbus_proxy=xdg-dbus-proxy \
-          ${NULL+}
+          _build
       env:
         CFLAGS: -O2 -Wp,-D_FORTIFY_SOURCE=2
     - name: Build flatpak
-      run: ninja -C _build
+      run: meson compile -C _build
       env:
         ASAN_OPTIONS: detect_leaks=0 # Right now we're not fully clean, but this gets us use-after-free etc
     - name: Run tests
@@ -93,7 +97,7 @@ jobs:
       if: failure() || cancelled()
       run: mv _build/meson-logs/* test-logs/ || true
     - name: Upload test logs
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: failure() || cancelled()
       with:
         name: test logs
@@ -111,9 +115,8 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo add-apt-repository ppa:flatpak/stable
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
-        sudo apt-get install -y libglib2.0-dev attr automake gettext autopoint bison  dbus gtk-doc-tools \
+        sudo apt-get install -y libglib2.0-dev attr gettext bison dbus gtk-doc-tools \
         libfuse-dev ostree libostree-dev libarchive-dev libzstd-dev libcap-dev libattr1-dev libdw-dev libelf-dev python3-pyparsing \
         libjson-glib-dev shared-mime-info desktop-file-utils libpolkit-agent-1-dev libpolkit-gobject-1-dev \
         libseccomp-dev libsoup2.4-dev libcurl4-openssl-dev libsystemd-dev libxml2-utils libgpgme11-dev gobject-introspection \
@@ -126,30 +129,24 @@ jobs:
         submodules: true
     - name: Create logs dir
       run: mkdir test-logs
-    - name: autogen.sh
-      run: NOCONFIGURE=1 ./autogen.sh
     - name: configure
       # We don't do gtk-doc or GObject-Introspection here, because they can
       # clash with AddressSanitizer. Instead, the clang build enables those.
       run: |
-        mkdir _build
-        pushd _build
-        ../configure  --enable-internal-checks --enable-asan --disable-introspection --without-curl
-        popd
+        meson setup \
+          -Db_sanitize=address,undefined \
+          -Dgir=disabled \
+          -Dgtkdoc=disabled \
+          -Dhttp_backend=soup \
+          -Dinternal_checks=true \
+          _build
       env:
         CFLAGS: -O2 -Wp,-D_FORTIFY_SOURCE=2
     - name: Build flatpak
-      run: make -C _build -j $(getconf _NPROCESSORS_ONLN)
-    # We build with Ubuntu 18.04's GLib to prove that we can, but there's a
-    # race condition that makes it fail tests, so upgrade to a version from
-    # a PPA before running the tests: see
-    # https://github.com/flatpak/flatpak/pull/3121,
-    # https://gitlab.gnome.org/GNOME/glib/-/issues/1014
-    - name: Upgrade GLib before running tests
-      run: |
-        sudo apt-get install -y libglib2.0-dev
+      # Can't use `meson compile` here because Ubuntu 20.04 is too old
+      run: ninja -C _build
     - name: Run tests
-      run: make -C _build check -j $(getconf _NPROCESSORS_ONLN)
+      run: meson test -C _build
       env:
         ASAN_OPTIONS: detect_leaks=0 # Right now we're not fully clean, but this gets us use-after-free etc
         LC_ALL: en_US.UTF-8
@@ -158,9 +155,9 @@ jobs:
       run: mv _build/test-suite.log test-logs/ || true
     - name: Collect individual test logs on cancel
       if: failure() || cancelled()
-      run: mv _build/tests/*.log test-logs/ || true
+      run: mv _build/meson-logs/* test-logs/ || true
     - name: Upload test logs
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: failure() || cancelled()
       with:
         name: test logs
@@ -170,7 +167,7 @@ jobs:
     permissions:
       security-events: write # for codeql
     name: Build with clang and analyze
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -181,7 +178,7 @@ jobs:
     steps:
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
+      uses: github/codeql-action/init@v3
       with:
         languages: ${{ matrix.language }}
         # If you wish to specify custom queries, you can do so here or in a config file.
@@ -191,26 +188,30 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo add-apt-repository ppa:flatpak/stable
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
-        sudo apt-get install -y libglib2.0-dev attr automake gettext autopoint bison  dbus gtk-doc-tools \
+        sudo apt-get install -y libglib2.0-dev attr gettext bison dbus gtk-doc-tools \
         libfuse-dev ostree libostree-dev libarchive-dev libzstd-dev libcap-dev libattr1-dev libdw-dev libelf-dev python3-pyparsing \
         libjson-glib-dev shared-mime-info desktop-file-utils libpolkit-agent-1-dev libpolkit-gobject-1-dev \
         libseccomp-dev libsoup2.4-dev libcurl4-openssl-dev libsystemd-dev libxml2-utils libgpgme11-dev gobject-introspection \
-        libgirepository1.0-dev libappstream-dev libdconf-dev clang e2fslibs-dev
+        libgirepository1.0-dev libappstream-dev libdconf-dev clang e2fslibs-dev meson socat
     - name: Check out flatpak
       uses: actions/checkout@v4
       with:
         submodules: true
     - name: configure
-      run: ./autogen.sh
+      run: |
+        meson setup \
+          -Dgir=enabled \
+          -Dgtkdoc=enabled \
+          _build
       env:
         CC: clang
         CFLAGS: -Werror=unused-variable
     - name: Build flatpak
-      run: make -j $(getconf _NPROCESSORS_ONLN)
+      # Can't use `meson compile` here because Ubuntu 20.04 is too old
+      run: ninja -C _build
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v3
 
   valgrind:
     name: Run tests in valgrind
@@ -222,45 +223,40 @@ jobs:
       run: |
         sudo add-apt-repository ppa:flatpak/stable
         sudo apt-get update
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-focal main' # Needed for updates to work
-        sudo apt-get install -y libglib2.0-dev attr automake gettext autopoint bison  dbus gtk-doc-tools \
+        sudo apt-get install -y libglib2.0-dev attr gettext bison dbus gtk-doc-tools \
         libfuse-dev ostree libostree-dev libarchive-dev libzstd-dev libcap-dev libattr1-dev libdw-dev libelf-dev python3-pyparsing \
         libjson-glib-dev shared-mime-info desktop-file-utils libpolkit-agent-1-dev libpolkit-gobject-1-dev \
         libseccomp-dev libsoup2.4-dev libcurl4-openssl-dev libsystemd-dev libxml2-utils libgpgme11-dev gobject-introspection \
         libgirepository1.0-dev libappstream-dev libdconf-dev clang socat meson libdbus-1-dev \
-        valgrind e2fslibs-dev
+        valgrind e2fslibs-dev meson
     - name: Check out flatpak
       uses: actions/checkout@v4
       with:
         submodules: true
     - name: Create logs dir
       run: mkdir test-logs
-    - name: autogen.sh
-      run: NOCONFIGURE=1 ./autogen.sh
     - name: configure
       run: |
-        mkdir _build
-        pushd _build
-        ../configure --enable-gtk-doc --enable-gtk-doc-html --enable-introspection
-        popd
+        meson setup \
+          -Dgir=enabled \
+          -Dgtkdoc=enabled \
+          _build
       env:
         CFLAGS: -O2
     - name: Build flatpak
-      run: make -C _build -j $(getconf _NPROCESSORS_ONLN)
-    - name: Distcheck
-      run: make -C _build distcheck
+      run: meson compile -C _build
     - name: Run tests under valgrind
-      run: make -C _build check
+      run: meson test -C _build
       env:
         FLATPAK_TESTS_VALGRIND: true
     - name: Collect overall test logs on failure
       if: failure()
-      run: mv _build/test-suite.log test-logs/ || true
+      run: mv _build/meson-logs/* test-logs/ || true
     - name: Collect individual test logs on cancel
       if: failure() || cancelled()
       run: mv _build/tests/*.log test-logs/ || true
     - name: Upload test logs
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: failure() || cancelled()
       with:
         name: test logs

@@ -28,6 +28,7 @@
 #include "flatpak-error.h"
 #include "flatpak-installation-private.h"
 #include "flatpak-progress-private.h"
+#include "flatpak-repo-utils-private.h"
 #include "flatpak-transaction-private.h"
 #include "flatpak-utils-http-private.h"
 #include "flatpak-utils-private.h"
@@ -2409,9 +2410,8 @@ find_runtime_remote (FlatpakTransaction             *self,
   /* Put @app_remote before the others at its priority level */
   rsd.dir = priv->dir;
   rsd.prioritized_remote = app_remote;
-  g_qsort_with_data (all_remotes, g_strv_length (all_remotes), sizeof (char *),
-                     cmp_remote_with_prioritized, &rsd);
-
+  qsort_r (all_remotes, g_strv_length (all_remotes), sizeof (char *),
+           cmp_remote_with_prioritized, &rsd);
 
   app_pref = flatpak_decomposed_get_pref (app_ref);
   runtime_pref = flatpak_decomposed_get_pref (runtime_ref);
@@ -3454,8 +3454,8 @@ try_resolve_op_from_metadata (FlatpakTransaction *self,
 
   if (flatpak_remote_state_lookup_sparse_cache (state, flatpak_decomposed_get_ref (op->ref), &sparse_cache, NULL))
     {
-      op->eol = g_strdup (var_metadata_lookup_string (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_ENDOFLINE, NULL));
-      op->eol_rebase = g_strdup (var_metadata_lookup_string (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_ENDOFLINE_REBASE, NULL));
+      op->eol = g_strdup (var_metadata_lookup_string (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_ENDOFLIFE, NULL));
+      op->eol_rebase = g_strdup (var_metadata_lookup_string (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_ENDOFLIFE_REBASE, NULL));
       op->token_type = GINT32_FROM_LE (var_metadata_lookup_int32 (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_TOKEN_TYPE, op->token_type));
 
       if (op->eol_rebase)
@@ -3941,9 +3941,11 @@ request_tokens_for_remote (FlatpakTransaction *self,
       g_autoptr(GFile) deploy = NULL;
       deploy = flatpak_dir_get_if_deployed (priv->dir, auto_install_ref, NULL, cancellable);
       if (deploy == NULL)
-        g_signal_emit (self, signals[INSTALL_AUTHENTICATOR], 0,
-                       remote, flatpak_decomposed_get_ref (auto_install_ref));
-      deploy = flatpak_dir_get_if_deployed (priv->dir, auto_install_ref, NULL, cancellable);
+        {
+          g_signal_emit (self, signals[INSTALL_AUTHENTICATOR], 0,
+                         remote, flatpak_decomposed_get_ref (auto_install_ref));
+          deploy = flatpak_dir_get_if_deployed (priv->dir, auto_install_ref, NULL, cancellable);
+        }
       if (deploy == NULL)
         return flatpak_fail (error, _("No authenticator installed for remote '%s'"), remote);
     }
@@ -4024,7 +4026,7 @@ request_tokens_for_remote (FlatpakTransaction *self,
   g_assert (priv->active_request_id == 0); /* No outstanding requests */
   priv->active_request = NULL;
 
-  results = data.results; /* Make sure its freed as needed */
+  results = data.results; /* Make sure it's freed as needed */
 
   {
     g_autofree char *results_str = results != NULL ? g_variant_print (results, FALSE) : g_strdup ("NULL");
@@ -4082,6 +4084,7 @@ request_tokens_for_remote (FlatpakTransaction *self,
               token = token_for_refs;
               break;
             }
+          g_clear_pointer (&refs_strv, g_free);
         }
 
       if (token == NULL)

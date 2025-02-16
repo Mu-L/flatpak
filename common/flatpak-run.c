@@ -1,5 +1,6 @@
 /* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2014-2019 Red Hat, Inc
+ * Copyright © 2024 GNOME Foundation, Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -16,6 +17,7 @@
  *
  * Authors:
  *       Alexander Larsson <alexl@redhat.com>
+ *       Hubert Figuière <hub@figuiere.net>
  */
 
 #include "config.h"
@@ -53,11 +55,13 @@
 #include <gio/gio.h>
 #include "libglnx.h"
 
+#include "flatpak-dbus-generated.h"
 #include "flatpak-run-dbus-private.h"
 #include "flatpak-run-private.h"
 #include "flatpak-run-sockets-private.h"
 #include "flatpak-utils-base-private.h"
 #include "flatpak-dir-private.h"
+#include "flatpak-dir-utils-private.h"
 #include "flatpak-instance-private.h"
 #include "flatpak-systemd-dbus-generated.h"
 #include "flatpak-document-dbus-generated.h"
@@ -65,6 +69,12 @@
 #include "session-helper/flatpak-session-helper.h"
 
 #define DEFAULT_SHELL "/bin/sh"
+
+typedef FlatpakSessionHelper AutoFlatpakSessionHelper;
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (AutoFlatpakSessionHelper, g_object_unref)
+
+typedef XdpDbusDocuments AutoXdpDbusDocuments;
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (AutoXdpDbusDocuments, g_object_unref)
 
 static int
 flatpak_extension_compare_by_path (gconstpointer _a,
@@ -145,12 +155,12 @@ flatpak_run_add_extension_args (FlatpakBwrap      *bwrap,
         {
           g_autofree char *parent = g_path_get_dirname (directory);
 
-          if (g_hash_table_lookup (mounted_tmpfs, parent) == NULL)
+          if (!g_hash_table_contains (mounted_tmpfs, parent))
             {
               flatpak_bwrap_add_args (bwrap,
                                       "--tmpfs", parent,
                                       NULL);
-              g_hash_table_insert (mounted_tmpfs, g_steal_pointer (&parent), "mounted");
+              g_hash_table_add (mounted_tmpfs, g_steal_pointer (&parent));
             }
         }
 
@@ -221,13 +231,13 @@ flatpak_run_add_extension_args (FlatpakBwrap      *bwrap,
                 {
                   g_autofree char *symlink_path = g_build_filename (merge_dir, dent->d_name, NULL);
                   /* Only create the first, because extensions are listed in prio order */
-                  if (g_hash_table_lookup (created_symlink, symlink_path) == NULL)
+                  if (!g_hash_table_contains (created_symlink, symlink_path))
                     {
                       g_autofree char *symlink = g_build_filename (directory, ext->merge_dirs[i], dent->d_name, NULL);
                       flatpak_bwrap_add_args (bwrap,
                                               "--symlink", symlink, symlink_path,
                                               NULL);
-                      g_hash_table_insert (created_symlink, g_steal_pointer (&symlink_path), "created");
+                      g_hash_table_add (created_symlink, g_steal_pointer (&symlink_path));
                     }
                 }
             }
@@ -373,11 +383,20 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
       flatpak_bwrap_add_args (bwrap,
                               "--dev", "/dev",
                               NULL);
+
+      if (context->devices & FLATPAK_CONTEXT_DEVICE_USB)
+        {
+          g_info ("Allowing USB device access.");
+
+          if (g_file_test ("/dev/bus/usb", G_FILE_TEST_IS_DIR))
+              flatpak_bwrap_add_args (bwrap, "--dev-bind", "/dev/bus/usb", "/dev/bus/usb", NULL);
+        }
+
       if (context->devices & FLATPAK_CONTEXT_DEVICE_DRI)
         {
           g_info ("Allowing dri access");
           int i;
-          char *dri_devices[] = {
+          static const char * const dri_devices[] = {
             "/dev/dri",
             /* mali */
             "/dev/mali",
@@ -488,7 +507,7 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
   flatpak_run_add_socket_args_environment (bwrap, context->shares, context->sockets, app_id, instance_id);
   flatpak_run_add_session_dbus_args (bwrap, proxy_arg_bwrap, context, flags, app_id);
   flatpak_run_add_system_dbus_args (bwrap, proxy_arg_bwrap, context, flags);
-  flatpak_run_add_a11y_dbus_args (bwrap, proxy_arg_bwrap, context, flags);
+  flatpak_run_add_a11y_dbus_args (bwrap, proxy_arg_bwrap, context, flags, app_id);
 
   /* Must run this before spawning the dbus proxy, to ensure it
      ends up in the app cgroup */
@@ -518,10 +537,13 @@ typedef struct
 
 static const ExportData default_exports[] = {
   {"PATH", "/app/bin:/usr/bin"},
-  /* We always want to unset LD_LIBRARY_PATH to avoid inheriting weird
-   * dependencies from the host. But if not using ld.so.cache this is
-   * later set. */
+  /* We always want to unset LD variables to avoid inheriting weird
+   * dependencies from the host. But if not using ld.so.cache LD_LIBRARY_PATH
+   is later set. */
   {"LD_LIBRARY_PATH", NULL},
+  {"LD_PRELOAD", NULL},
+  {"LD_AUDIT", NULL},
+
   {"XDG_CONFIG_DIRS", "/app/etc/xdg:/etc/xdg"},
   {"XDG_DATA_DIRS", "/app/share:/usr/share"},
   {"SHELL", "/bin/sh"},
@@ -537,11 +559,15 @@ static const ExportData default_exports[] = {
   /* Ensure our container environment variable takes precedence over the one
    * set by a container manager. */
   {"container", NULL},
+  /* We always make the zoneinfo available at /usr/share/zoneinfo even if it
+   * is somewhere else outside of the sandbox. */
+  {"TZDIR", NULL},
 
   /* Some env vars are common enough and will affect the sandbox badly
      if set on the host. We clear these always. If updating this list,
      also update the list in flatpak-run.xml. */
   {"PYTHONPATH", NULL},
+  {"PYTHONPYCACHEPREFIX", NULL},
   {"PERLLIB", NULL},
   {"PERL5LIB", NULL},
   {"XCURSOR_PATH", NULL},
@@ -561,8 +587,15 @@ static const ExportData default_exports[] = {
   {"XKB_CONFIG_ROOT", NULL},
   {"GIO_EXTRA_MODULES", NULL},
   {"GDK_BACKEND", NULL},
+  {"VK_ADD_DRIVER_FILES", NULL},
+  {"VK_ADD_LAYER_PATH", NULL},
   {"VK_DRIVER_FILES", NULL},
   {"VK_ICD_FILENAMES", NULL},
+  {"VK_LAYER_PATH", NULL},
+  {"__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS", NULL},
+  {"__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES", NULL},
+  {"__EGL_VENDOR_LIBRARY_DIRS", NULL},
+  {"__EGL_VENDOR_LIBRARY_FILENAMES", NULL},
 };
 
 static const ExportData no_ld_so_cache_exports[] = {
@@ -1028,12 +1061,15 @@ flatpak_app_compute_permissions (GKeyFile *app_metadata,
 
       /* Don't inherit any permissions from the runtime, only things like env vars. */
       flatpak_context_reset_permissions (app_context);
+
+      flatpak_context_dump (app_context, "Metadata from runtime");
     }
 
   if (app_metadata != NULL &&
       !flatpak_context_load_metadata (app_context, app_metadata, error))
     return NULL;
 
+  flatpak_context_dump (app_context, "Metadata from app manifest");
   return g_steal_pointer (&app_context);
 }
 
@@ -1587,12 +1623,14 @@ add_tzdata_args (FlatpakBwrap *bwrap,
   /* Check for runtime /usr/share/zoneinfo */
   if (runtime_zoneinfo != NULL && g_file_query_exists (runtime_zoneinfo, NULL))
     {
+      const char *tzdir = flatpak_get_tzdir ();
+
       /* Check for host /usr/share/zoneinfo */
-      if (g_file_test ("/usr/share/zoneinfo", G_FILE_TEST_IS_DIR))
+      if (g_file_test (tzdir, G_FILE_TEST_IS_DIR))
         {
           /* Here we assume the host timezone file exist in the host data */
           flatpak_bwrap_add_args (bwrap,
-                                  "--ro-bind", "/usr/share/zoneinfo", "/usr/share/zoneinfo",
+                                  "--ro-bind", tzdir, "/usr/share/zoneinfo",
                                   "--symlink", localtime_content, "/etc/localtime",
                                   NULL);
         }
@@ -1886,13 +1924,13 @@ setup_seccomp (FlatpakBwrap   *bwrap,
     /* seccomp can't look into clone3()'s struct clone_args to check whether
      * the flags are OK, so we have no choice but to block clone3().
      * Return ENOSYS so user-space will fall back to clone().
-     * (GHSA-67h7-w3jq-vh4q; see also https://github.com/moby/moby/commit/9f6b562d) */
+     * (CVE-2021-41133; see also https://github.com/moby/moby/commit/9f6b562d) */
     {SCMP_SYS (clone3), ENOSYS},
 
     /* New mount manipulation APIs can also change our VFS. There's no
      * legitimate reason to do these in the sandbox, so block all of them
      * rather than thinking about which ones might be dangerous.
-     * (GHSA-67h7-w3jq-vh4q) */
+     * (CVE-2021-41133) */
     {SCMP_SYS (open_tree), ENOSYS},
     {SCMP_SYS (move_mount), ENOSYS},
     {SCMP_SYS (fsopen), ENOSYS},
@@ -2140,6 +2178,16 @@ flatpak_run_setup_usr_links (FlatpakBwrap *bwrap,
     }
 }
 
+/* Directories in /sys to share with the sandbox if accessible. */
+static const char *const sysfs_dirs[] =
+{
+  "/sys/block",
+  "/sys/bus",
+  "/sys/class",
+  "/sys/dev",
+  "/sys/devices"
+};
+
 gboolean
 flatpak_run_setup_base_argv (FlatpakBwrap   *bwrap,
                              GFile          *runtime_files,
@@ -2159,6 +2207,7 @@ flatpak_run_setup_base_argv (FlatpakBwrap   *bwrap,
   gboolean parent_expose_pids = (flags & FLATPAK_RUN_FLAG_PARENT_EXPOSE_PIDS) != 0;
   gboolean parent_share_pids = (flags & FLATPAK_RUN_FLAG_PARENT_SHARE_PIDS) != 0;
   gboolean bwrap_unprivileged = flatpak_bwrap_is_unprivileged ();
+  gsize i;
 
   /* Disable recursive userns for all flatpak processes, as we need this
    * to guarantee that the sandbox can't restructure the filesystem.
@@ -2227,15 +2276,20 @@ flatpak_run_setup_base_argv (FlatpakBwrap   *bwrap,
                           "--perms", "0700", "--dir", run_dir,
                           "--setenv", "XDG_RUNTIME_DIR", run_dir,
                           "--symlink", "../run", "/var/run",
-                          "--ro-bind", "/sys/block", "/sys/block",
-                          "--ro-bind", "/sys/bus", "/sys/bus",
-                          "--ro-bind", "/sys/class", "/sys/class",
-                          "--ro-bind", "/sys/dev", "/sys/dev",
-                          "--ro-bind", "/sys/devices", "/sys/devices",
                           "--ro-bind-try", "/proc/self/ns/user", "/run/.userns",
                           /* glib uses this like /etc/timezone */
                           "--symlink", "/etc/timezone", "/var/db/zoneinfo",
                           NULL);
+
+  for (i = 0; i < G_N_ELEMENTS (sysfs_dirs); i++)
+    {
+      const char *dir = sysfs_dirs[i];
+
+      if (access (dir, R_OK|X_OK) == 0)
+        flatpak_bwrap_add_args (bwrap, "--ro-bind", dir, dir, NULL);
+      else
+        g_info ("Not sharing %s with sandbox: %s", dir, g_strerror (errno));
+    }
 
   if (flags & FLATPAK_RUN_FLAG_DIE_WITH_PARENT)
     flatpak_bwrap_add_args (bwrap,
@@ -2643,7 +2697,8 @@ regenerate_ld_cache (GPtrArray    *base_argv_array,
   g_array_append_vals (combined_fd_array, base_fd_array->data, base_fd_array->len);
   g_array_append_vals (combined_fd_array, bwrap->fds->data, bwrap->fds->len);
 
-  /* We use LEAVE_DESCRIPTORS_OPEN to work around dead-lock, see flatpak_close_fds_workaround */
+  /* We use LEAVE_DESCRIPTORS_OPEN and close them in the child_setup
+   * to work around a deadlock in GLib < 2.60 */
   if (!g_spawn_sync (NULL,
                      (char **) bwrap->argv->pdata,
                      bwrap->envp,
@@ -2728,9 +2783,9 @@ check_parental_controls (FlatpakDecomposed *app_ref,
 
   manager = mct_manager_new (system_bus);
   app_filter = mct_manager_get_app_filter (manager, getuid (),
-                                           MCT_GET_APP_FILTER_FLAGS_INTERACTIVE,
+                                           MCT_MANAGER_GET_VALUE_FLAGS_INTERACTIVE,
                                            cancellable, &local_error);
-  if (g_error_matches (local_error, MCT_APP_FILTER_ERROR, MCT_APP_FILTER_ERROR_DISABLED))
+  if (g_error_matches (local_error, MCT_MANAGER_ERROR, MCT_MANAGER_ERROR_DISABLED))
     {
       g_info ("Skipping parental controls check for %s since parental "
               "controls are disabled globally", flatpak_decomposed_get_ref (app_ref));
@@ -3001,11 +3056,18 @@ flatpak_run_app (FlatpakDecomposed   *app_ref,
     }
 
   if (sandboxed)
-    flatpak_context_make_sandboxed (app_context);
+    {
+      flatpak_context_make_sandboxed (app_context);
+      flatpak_context_dump (app_context, "After making sandboxed");
+    }
 
   if (extra_context)
-    flatpak_context_merge (app_context, extra_context);
+    {
+      flatpak_context_dump (extra_context, "Command-line overrides");
+      flatpak_context_merge (app_context, extra_context);
+    }
 
+  flatpak_context_dump (app_context, "Final context");
   original_runtime_files = flatpak_deploy_get_files (runtime_deploy);
 
   if (custom_usr_path != NULL)
@@ -3089,6 +3151,12 @@ flatpak_run_app (FlatpakDecomposed   *app_ref,
           if (do_migrate)
             {
               do_migrate = FALSE; /* Don't migrate older things, they are likely symlinks to this dir */
+
+              /* Don't migrate a symlink pointing to the new data dir. It was likely left over
+               * from a previous migration and would end up pointing to itself */
+              if (g_file_info_get_is_symlink (previous_app_id_dir_info) &&
+                  g_strcmp0 (g_file_info_get_symlink_target (previous_app_id_dir_info), app_id) == 0)
+                break;
 
               if (!flatpak_file_rename (previous_app_id_dir, real_app_id_dir, cancellable, &local_error))
                 {
@@ -3418,7 +3486,7 @@ flatpak_run_app (FlatpakDecomposed   *app_ref,
   if (!flatpak_bwrap_bundle_args (bwrap, 1, -1, FALSE, error))
     return FALSE;
 
-  flatpak_bwrap_add_arg (bwrap, command);
+  flatpak_bwrap_add_args (bwrap, "--", command, NULL);
 
   if (!add_rest_args (bwrap, app_id,
                       exports, (flags & FLATPAK_RUN_FLAG_FILE_FORWARDING) != 0,
@@ -3441,13 +3509,21 @@ flatpak_run_app (FlatpakDecomposed   *app_ref,
       char pid_str[64];
       g_autofree char *pid_path = NULL;
       GSpawnFlags spawn_flags;
+      GSpawnChildSetupFunc child_setup;
 
       spawn_flags = G_SPAWN_SEARCH_PATH;
       if (flags & FLATPAK_RUN_FLAG_DO_NOT_REAP ||
           (flags & FLATPAK_RUN_FLAG_BACKGROUND) == 0)
         spawn_flags |= G_SPAWN_DO_NOT_REAP_CHILD;
 
-      /* We use LEAVE_DESCRIPTORS_OPEN to work around dead-lock, see flatpak_close_fds_workaround */
+      if (flags & FLATPAK_RUN_FLAG_BACKGROUND)
+        child_setup = flatpak_bwrap_child_setup_cb;
+      else
+        child_setup = flatpak_bwrap_child_setup_inherit_fds_cb;
+
+      /* Even in the case where we want them closed, we use
+       * LEAVE_DESCRIPTORS_OPEN and close them in the child_setup
+       * to work around a deadlock in GLib < 2.60 */
       spawn_flags |= G_SPAWN_LEAVE_DESCRIPTORS_OPEN;
 
       /* flatpak_bwrap_envp_to_args() moved the environment variables to
@@ -3460,7 +3536,7 @@ flatpak_run_app (FlatpakDecomposed   *app_ref,
                           (char **) bwrap->argv->pdata,
                           bwrap->envp,
                           spawn_flags,
-                          flatpak_bwrap_child_setup_cb, bwrap->fds,
+                          child_setup, bwrap->fds,
                           &child_pid,
                           error))
         return FALSE;

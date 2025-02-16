@@ -116,7 +116,24 @@ built_headers = [
   flatpak_variant[1],
 ]
 
-libflatpak_common_deps = []
+libflatpak_common_deps = [
+  base_deps,
+  dconf_dep,
+  gpgme_dep,
+  json_glib_dep,
+  libarchive_dep,
+  libcurl_dep,
+  libglnx_dep,
+  libostree_dep,
+  libseccomp_dep,
+  libsoup_dep,
+  libsystemd_dep,
+  libxml_dep,
+  libzstd_dep,
+  malcontent_dep,
+  polkit_agent_dep,
+  xau_dep,
+]
 built_sources = []
 
 if build_wayland_security_context
@@ -168,6 +185,7 @@ sources = [
   'flatpak-chain-input-stream.c',
   'flatpak-context.c',
   'flatpak-dir.c',
+  'flatpak-dir-utils.c',
   'flatpak-error.c',
   'flatpak-exports.c',
   'flatpak-glib-backports.c',
@@ -186,6 +204,7 @@ sources = [
   'flatpak-related-ref.c',
   'flatpak-remote-ref.c',
   'flatpak-remote.c',
+  'flatpak-repo-utils.c',
   'flatpak-run.c',
   'flatpak-run-cups.c',
   'flatpak-run-dbus.c',
@@ -197,6 +216,8 @@ sources = [
   'flatpak-utils-http.c',
   'flatpak-utils.c',
   'flatpak-uri.c',
+  'flatpak-usb.c',
+  'flatpak-xml-utils.c',
   'flatpak-zstd-decompressor.c',
 ]
 
@@ -206,26 +227,7 @@ endif
 
 libflatpak_common = static_library(
   'flatpak-common',
-  dependencies : [
-    base_deps,
-    dconf_dep,
-    gpgme_dep,
-    json_glib_dep,
-    libarchive_dep,
-    libcurl_dep,
-    libflatpak_common_base_dep,
-    libflatpak_common_deps,
-    libglnx_dep,
-    libostree_dep,
-    libseccomp_dep,
-    libsoup_dep,
-    libsystemd_dep,
-    libxml_dep,
-    libzstd_dep,
-    malcontent_dep,
-    polkit_agent_dep,
-    xau_dep,
-  ],
+  dependencies : [libflatpak_common_base_dep] + libflatpak_common_deps,
   gnu_symbol_visibility : 'hidden',
   include_directories : [common_include_directories],
   install : false,
@@ -253,7 +255,7 @@ libflatpak = library(
   gnu_symbol_visibility : 'hidden',
   include_directories : [common_include_directories],
   install : true,
-  link_args : ['-export-dynamic'],
+  link_args : ['-Wl,--export-dynamic'],
   link_whole : [
     libflatpak_common_base,
     libflatpak_common,
@@ -262,7 +264,7 @@ libflatpak = library(
   version : '0.@0@.0'.format(flatpak_binary_age),
 )
 libflatpak_dep = declare_dependency(
-  dependencies : base_deps,
+  dependencies : libflatpak_common_deps,
   include_directories : [common_include_directories],
   link_with : [
     libflatpak,

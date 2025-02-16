@@ -49,14 +49,17 @@
 
 #include "flatpak-appdata-private.h"
 #include "flatpak-dir-private.h"
+#include "flatpak-dir-utils-private.h"
 #include "flatpak-error.h"
 #include "flatpak-locale-utils-private.h"
 #include "flatpak-oci-registry-private.h"
 #include "flatpak-ref.h"
+#include "flatpak-repo-utils-private.h"
 #include "flatpak-run-private.h"
 #include "flatpak-utils-base-private.h"
 #include "flatpak-variant-private.h"
 #include "flatpak-variant-impl-private.h"
+#include "flatpak-xml-utils-private.h"
 #include "libglnx.h"
 #include "system-helper/flatpak-system-helper.h"
 
@@ -77,10 +80,13 @@
 
 #define SYSCONF_INSTALLATIONS_DIR "installations.d"
 #define SYSCONF_INSTALLATIONS_FILE_EXT ".conf"
-#define SYSCONF_REMOTES_DIR "remotes.d"
-#define SYSCONF_REMOTES_FILE_EXT ".flatpakrepo"
+
+#define FLATPAK_REMOTES_DIR "remotes.d"
+#define FLATPAK_REMOTES_FILE_EXT ".flatpakrepo"
 
 #define SIDELOAD_REPOS_DIR_NAME "sideload-repos"
+
+#define FLATPAK_TRIGGERS_DIR "triggers"
 
 #ifdef USE_SYSTEM_HELPER
 /* This uses a weird Auto prefix to avoid conflicts with later added polkit types.
@@ -298,6 +304,25 @@ get_config_dir_location (void)
         setup_value = (gsize) config_dir;
       else
         setup_value = (gsize) FLATPAK_CONFIGDIR;
+      g_once_init_leave (&path, setup_value);
+    }
+
+  return (const char *) path;
+}
+
+static const char *
+get_data_dir_location (void)
+{
+  static gsize path = 0;
+
+  if (g_once_init_enter (&path))
+    {
+      gsize setup_value = 0;
+      const char *data_dir = g_getenv ("FLATPAK_DATA_DIR");
+      if (data_dir != NULL)
+        setup_value = (gsize) data_dir;
+      else
+        setup_value = (gsize) FLATPAK_DATADIR;
       g_once_init_leave (&path, setup_value);
     }
 
@@ -741,7 +766,7 @@ flatpak_remote_state_lookup_ref (FlatpakRemoteState *self,
   if (!flatpak_remote_state_allow_ref (self, ref))
     {
       return flatpak_fail_error (error, FLATPAK_ERROR_REF_NOT_FOUND,
-                                 _("No entry for %s in remote '%s' summary flatpak cache "),
+                                 _("No entry for %s in remote %s summary flatpak cache"),
                                  ref, self->remote_name);
     }
 
@@ -878,7 +903,7 @@ flatpak_remote_state_lookup_cache (FlatpakRemoteState *self,
   summary_v = get_summary_for_ref (self, ref);
   if (summary_v == NULL)
     return flatpak_fail_error (error, FLATPAK_ERROR_REF_NOT_FOUND,
-                               _("No entry for %s in remote '%s' summary flatpak cache "),
+                               _("No entry for %s in remote %s summary flatpak cache"),
                                ref, self->remote_name);
 
 
@@ -907,7 +932,7 @@ flatpak_remote_state_lookup_cache (FlatpakRemoteState *self,
 
       if (!var_cache_lookup (cache, ref, &pos, &cache_data))
         return flatpak_fail_error (error, FLATPAK_ERROR_REF_NOT_FOUND,
-                                   _("No entry for %s in remote '%s' summary flatpak cache "),
+                                   _("No entry for %s in remote %s summary flatpak cache"),
                                    ref, self->remote_name);
     }
   else if (summary_version == 1)
@@ -919,7 +944,7 @@ flatpak_remote_state_lookup_cache (FlatpakRemoteState *self,
 
       if (!flatpak_var_ref_map_lookup_ref (ref_map, ref, &info))
         return flatpak_fail_error (error, FLATPAK_ERROR_REF_NOT_FOUND,
-                                   _("No entry for %s in remote '%s' summary cache "),
+                                   _("No entry for %s in remote %s summary flatpak cache"),
                                    ref, self->remote_name);
 
       commit_metadata = var_ref_info_get_metadata (info);
@@ -1495,16 +1520,48 @@ flatpak_deploy_get_overrides (FlatpakDeploy *deploy)
   FlatpakContext *overrides = flatpak_context_new ();
 
   if (deploy->system_overrides)
-    flatpak_context_merge (overrides, deploy->system_overrides);
+    {
+      flatpak_context_dump (deploy->system_overrides,
+                            "System-wide overrides for all apps");
+      flatpak_context_merge (overrides, deploy->system_overrides);
+    }
+  else
+    {
+      g_debug ("No system-wide overrides for all apps");
+    }
 
   if (deploy->system_app_overrides)
-    flatpak_context_merge (overrides, deploy->system_app_overrides);
+    {
+      flatpak_context_dump (deploy->system_app_overrides,
+                            "System-wide overrides for specified app");
+      flatpak_context_merge (overrides, deploy->system_app_overrides);
+    }
+  else
+    {
+      g_debug ("No system-wide per-app overrides for specified app");
+    }
 
   if (deploy->user_overrides)
-    flatpak_context_merge (overrides, deploy->user_overrides);
+    {
+      flatpak_context_dump (deploy->user_overrides,
+                            "Per-user overrides for all apps");
+      flatpak_context_merge (overrides, deploy->user_overrides);
+    }
+  else
+    {
+      g_debug ("No per-user overrides for all apps");
+    }
 
   if (deploy->user_app_overrides)
-    flatpak_context_merge (overrides, deploy->user_app_overrides);
+    {
+      flatpak_context_dump (deploy->user_app_overrides,
+                            "Per-user overrides for specified app");
+      flatpak_context_merge (overrides, deploy->user_app_overrides);
+    }
+  else
+    {
+      g_debug ("No per-user overrides for specified app");
+    }
 
   return overrides;
 }
@@ -1535,20 +1592,24 @@ flatpak_deploy_new (GFile             *dir,
 GFile *
 flatpak_get_system_default_base_dir_location (void)
 {
-  static gsize path = 0;
+  static gsize file = 0;
 
-  if (g_once_init_enter (&path))
+  if (g_once_init_enter (&file))
     {
       gsize setup_value = 0;
+      const char *path;
       const char *system_dir = g_getenv ("FLATPAK_SYSTEM_DIR");
-      if (system_dir != NULL)
-        setup_value = (gsize) system_dir;
+      if (system_dir != NULL && *system_dir != 0)
+        path = system_dir;
       else
-        setup_value = (gsize) FLATPAK_SYSTEMDIR;
-      g_once_init_leave (&path, setup_value);
+        path = FLATPAK_SYSTEMDIR;
+
+      setup_value = (gsize) g_file_new_for_path (path);
+
+      g_once_init_leave (&file, setup_value);
     }
 
-  return g_file_new_for_path ((char *) path);
+  return g_object_ref ((GFile *) file);
 }
 
 static FlatpakDirStorageType
@@ -1842,16 +1903,16 @@ GPtrArray *
 flatpak_get_system_base_dir_locations (GCancellable *cancellable,
                                        GError      **error)
 {
-  static gsize array = 0;
+  static gsize initialized = 0;
+  static GPtrArray *array = NULL;
 
-  if (g_once_init_enter (&array))
+  if (g_once_init_enter (&initialized))
     {
-      gsize setup_value = 0;
-      setup_value = (gsize) get_system_locations (cancellable, error);
-      g_once_init_leave (&array, setup_value);
+      array = get_system_locations (cancellable, error);
+      g_once_init_leave (&initialized, 1);
     }
 
-  return (GPtrArray *) array;
+  return array;
 }
 
 GFile *
@@ -1950,6 +2011,8 @@ flatpak_ensure_system_user_cache_dir_location (GError **error)
       /* and not writeable by others, but readable */
       (st_buf.st_mode & 0777) == 0755)
     return g_file_new_for_path (path);
+
+  g_clear_pointer (&path, g_free);
 
   path = g_strdup ("/var/tmp/flatpak-cache-XXXXXX");
 
@@ -2110,8 +2173,7 @@ flatpak_dir_revokefs_fuse_unmount (OstreeRepo **repo,
 
   fusermount = g_subprocess_new (G_SUBPROCESS_FLAGS_NONE,
                                  error,
-                                 "fusermount", "-u", "-z", mnt_dir,
-                                 NULL);
+                                 FUSERMOUNT, "-u", "-z", mnt_dir, NULL);
   if (g_subprocess_wait_check (fusermount, NULL, error))
     {
       g_autoptr(GFile) mnt_dir_file = g_file_new_for_path (mnt_dir);
@@ -3874,52 +3936,37 @@ copy_remote_config (GKeyFile *config,
     }
 }
 
-static GHashTable *
-_flatpak_dir_find_new_flatpakrepos (FlatpakDir *self, OstreeRepo *repo)
+static void
+_flatpak_dir_scan_new_flatpakrepos (const char          *dir_str,
+                                    GHashTable         **flatpakrepos,
+                                    const char * const  *remotes)
 {
-  g_autoptr(GHashTable) flatpakrepos = NULL;
-  g_autoptr(GFile) conf_dir = NULL;
+  g_autoptr(GFile) dir = NULL;
   g_autoptr(GFileEnumerator) dir_enum = NULL;
-  g_autoptr(GError) my_error = NULL;
-  g_autofree char *config_dir = NULL;
-  g_auto(GStrv) remotes = NULL;
-  g_auto(GStrv) applied_remotes = NULL;
 
-  g_assert (repo != NULL);
+  g_return_if_fail (dir_str != NULL);
+  g_return_if_fail (flatpakrepos != NULL);
 
-  /* Predefined remotes only applies for the default system installation */
-  if (self->user ||
-      (self->extra_data != NULL &&
-       strcmp (self->extra_data->id, SYSTEM_DIR_DEFAULT_ID) != 0))
-    return NULL;
-
-  config_dir = g_strdup_printf ("%s/%s",
-                                get_config_dir_location (),
-                                SYSCONF_REMOTES_DIR);
-  conf_dir = g_file_new_for_path (config_dir);
-  dir_enum = g_file_enumerate_children (conf_dir,
+  dir = g_file_new_for_path (dir_str);
+  dir_enum = g_file_enumerate_children (dir,
                                         G_FILE_ATTRIBUTE_STANDARD_NAME "," G_FILE_ATTRIBUTE_STANDARD_TYPE,
                                         G_FILE_QUERY_INFO_NONE,
-                                        NULL, &my_error);
-  if (my_error != NULL)
-    return NULL;
-
-  remotes = ostree_repo_remote_list (repo, NULL);
-  applied_remotes = g_key_file_get_string_list (ostree_repo_get_config (repo),
-                                                "core", "xa.applied-remotes", NULL, NULL);
+                                        NULL, NULL);
+  if (dir_enum == NULL)
+    return;
 
   while (TRUE)
     {
       GFileInfo *file_info;
-      GFile *path;
       const char *name;
       guint32 type;
+      g_autoptr(GError) local_error = NULL;
 
-      if (!g_file_enumerator_iterate (dir_enum, &file_info, &path,
-                                      NULL, &my_error))
+      if (!g_file_enumerator_iterate (dir_enum, &file_info, NULL,
+                                      NULL, &local_error))
         {
           g_info ("Unexpected error reading file in %s: %s",
-                  config_dir, my_error->message);
+                  dir_str, local_error->message);
           break;
         }
 
@@ -3929,22 +3976,58 @@ _flatpak_dir_find_new_flatpakrepos (FlatpakDir *self, OstreeRepo *repo)
       name = g_file_info_get_name (file_info);
       type = g_file_info_get_file_type (file_info);
 
-      if (type == G_FILE_TYPE_REGULAR && g_str_has_suffix (name, SYSCONF_REMOTES_FILE_EXT))
+      if (type == G_FILE_TYPE_REGULAR && g_str_has_suffix (name, FLATPAK_REMOTES_FILE_EXT))
         {
-          g_autofree char *remote_name = g_strndup (name, strlen (name) - strlen (SYSCONF_REMOTES_FILE_EXT));
+          g_autofree char *remote_name = g_strndup (name, strlen (name) - strlen (FLATPAK_REMOTES_FILE_EXT));
 
-          if (remotes && g_strv_contains ((const char * const *)remotes, remote_name))
+          if (remotes && g_strv_contains (remotes, remote_name))
             continue;
 
-          if (applied_remotes && g_strv_contains ((const char * const *)applied_remotes, remote_name))
-            continue;
+          if (*flatpakrepos == NULL)
+            *flatpakrepos = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
 
-          if (flatpakrepos == NULL)
-            flatpakrepos = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
-
-          g_hash_table_insert (flatpakrepos, g_steal_pointer (&remote_name), g_file_enumerator_get_child (dir_enum, file_info));
+          g_hash_table_insert (*flatpakrepos, g_steal_pointer (&remote_name), g_file_enumerator_get_child (dir_enum, file_info));
         }
     }
+}
+
+static GHashTable *
+_flatpak_dir_find_new_flatpakrepos (FlatpakDir *self, OstreeRepo *repo)
+{
+  g_autoptr(GHashTable) flatpakrepos = NULL;
+  g_autofree char *config_dir_str = NULL;
+  g_autofree char *os_config_dir_str = NULL;
+  g_auto(GStrv) ostree_remotes = NULL;
+  g_auto(GStrv) applied_remotes = NULL;
+  g_autoptr(GPtrArray) remotes = NULL;
+
+  g_assert (repo != NULL);
+
+  /* Predefined remotes only applies for the default system installation */
+  if (self->user ||
+      (self->extra_data &&
+       g_strcmp0 (self->extra_data->id, SYSTEM_DIR_DEFAULT_ID) != 0))
+    return NULL;
+
+  ostree_remotes = ostree_repo_remote_list (repo, NULL);
+  applied_remotes = g_key_file_get_string_list (ostree_repo_get_config (repo),
+                                                "core", "xa.applied-remotes", NULL, NULL);
+  remotes = g_ptr_array_new ();
+  for (int i = 0; ostree_remotes && ostree_remotes[i]; i++)
+    g_ptr_array_add (remotes, ostree_remotes[i]);
+  for (int i = 0; applied_remotes && applied_remotes[i]; i++)
+    g_ptr_array_add (remotes, applied_remotes[i]);
+  g_ptr_array_add (remotes, NULL);
+
+  config_dir_str = g_build_filename (get_config_dir_location (), FLATPAK_REMOTES_DIR, NULL);
+  _flatpak_dir_scan_new_flatpakrepos (config_dir_str,
+                                      &flatpakrepos,
+                                      (const char * const *) remotes->pdata);
+
+  os_config_dir_str = g_build_filename (get_data_dir_location (), FLATPAK_REMOTES_DIR, NULL);
+  _flatpak_dir_scan_new_flatpakrepos (os_config_dir_str,
+                                      &flatpakrepos,
+                                      (const char * const *) remotes->pdata);
 
   return g_steal_pointer (&flatpakrepos);
 }
@@ -7058,6 +7141,29 @@ out:
   return ret;
 }
 
+static void
+maybe_reload_dbus_config (GCancellable *cancellable)
+{
+  g_autoptr(GDBusConnection) session_bus = NULL;
+  g_autoptr(GVariant) ret = NULL;
+
+  session_bus = g_bus_get_sync (G_BUS_TYPE_SESSION, cancellable, NULL);
+  if (!session_bus)
+    return;
+
+  ret = g_dbus_connection_call_sync (session_bus,
+                                     "org.freedesktop.DBus",
+                                     "/org/freedesktop/DBus",
+                                     "org.freedesktop.DBus",
+                                     "ReloadConfig",
+                                     NULL,
+                                     NULL,
+                                     G_DBUS_CALL_FLAGS_NONE,
+                                     2000,
+                                     cancellable,
+                                     NULL);
+}
+
 gboolean
 flatpak_dir_run_triggers (FlatpakDir   *self,
                           GCancellable *cancellable,
@@ -7068,7 +7174,9 @@ flatpak_dir_run_triggers (FlatpakDir   *self,
   g_autoptr(GFileInfo) child_info = NULL;
   g_autoptr(GFile) triggersdir = NULL;
   GError *temp_error = NULL;
-  const char *triggerspath;
+  g_autofree char *triggerspath = NULL;
+
+  maybe_reload_dbus_config (cancellable);
 
   if (flatpak_dir_use_system_helper (self, NULL))
     {
@@ -7084,9 +7192,9 @@ flatpak_dir_run_triggers (FlatpakDir   *self,
       return TRUE;
     }
 
-  triggerspath = g_getenv ("FLATPAK_TRIGGERSDIR");
+  triggerspath = g_strdup (g_getenv ("FLATPAK_TRIGGERSDIR"));
   if (triggerspath == NULL)
-    triggerspath = FLATPAK_TRIGGERDIR;
+    triggerspath = g_build_filename (get_data_dir_location (), FLATPAK_TRIGGERS_DIR, NULL);
 
   g_info ("running triggers from %s", triggerspath);
 
@@ -7132,6 +7240,7 @@ flatpak_dir_run_triggers (FlatpakDir   *self,
                                   "--proc", "/proc",
                                   "--dev", "/dev",
                                   "--bind", basedir, basedir,
+                                  "--",
                                   NULL);
 #endif
           flatpak_bwrap_add_args (bwrap,
@@ -7143,7 +7252,8 @@ flatpak_dir_run_triggers (FlatpakDir   *self,
           commandline = flatpak_quote_argv ((const char **) bwrap->argv->pdata, -1);
           g_info ("Running '%s'", commandline);
 
-          /* We use LEAVE_DESCRIPTORS_OPEN to work around dead-lock, see flatpak_close_fds_workaround */
+          /* We use LEAVE_DESCRIPTORS_OPEN and close them in the child_setup
+           * to work around a deadlock in GLib < 2.60 */
           if (!g_spawn_sync ("/",
                              (char **) bwrap->argv->pdata,
                              NULL,
@@ -7464,9 +7574,6 @@ export_desktop_file (const char         *app,
   g_autofree gchar *new_data = NULL;
   gsize new_data_len;
   g_autoptr(GKeyFile) keyfile = NULL;
-  g_autofree gchar *old_exec = NULL;
-  gint old_argc;
-  g_auto(GStrv) old_argv = NULL;
   g_auto(GStrv) groups = NULL;
   g_autofree char *escaped_app = maybe_quote (app);
   g_autofree char *escaped_branch = maybe_quote (branch);
@@ -7516,6 +7623,15 @@ export_desktop_file (const char         *app,
 
       /* Add a marker so consumers can easily find out that this launches a sandbox */
       g_key_file_set_string (keyfile, G_KEY_FILE_DESKTOP_GROUP, "X-Flatpak", app);
+
+      /* Disable krunner dbusplugins by default, so that flatpak applications cannot
+       * unintentionally grab sensitive search data.
+       */
+      if (g_key_file_get_boolean (keyfile, G_KEY_FILE_DESKTOP_GROUP,
+                               "X-KDE-PluginInfo-EnabledByDefault", NULL))
+        {
+          g_key_file_set_boolean (keyfile, G_KEY_FILE_DESKTOP_GROUP, "X-KDE-PluginInfo-EnabledByDefault", FALSE);
+        }
 
       /* If the app has been renamed, add its old .desktop filename to
        * X-Flatpak-RenamedFrom in the new .desktop file, taking care not to
@@ -7582,6 +7698,9 @@ export_desktop_file (const char         *app,
 
   for (i = 0; groups[i] != NULL; i++)
     {
+      gint old_argc;
+      g_auto(GStrv) old_argv = NULL;
+      g_autofree gchar *old_exec = NULL;
       g_autoptr(GString) new_exec = NULL;
       g_auto(GStrv) flatpak_run_opts = g_key_file_get_string_list (keyfile, groups[i], "X-Flatpak-RunOptions", NULL, NULL);
       g_autofree char *flatpak_run_args = format_flatpak_run_args_from_run_opts (flatpak_run_opts);
@@ -7697,8 +7816,8 @@ rewrite_export_dir (const char         *app,
   if (!glnx_dirfd_iterator_init_at (source_parent_fd, source_name, FALSE, &source_iter, error))
     goto out;
 
-  exports_allowed = flatpak_get_allowed_exports (source_path, app, context,
-                                                 &allowed_extensions, &allowed_prefixes, &require_exact_match);
+  exports_allowed = flatpak_context_get_allowed_exports (context, source_path, app,
+                                                         &allowed_extensions, &allowed_prefixes, &require_exact_match);
 
   visited_children = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
@@ -7987,6 +8106,7 @@ flatpak_export_dir (GFile        *source,
     "share/icons",                         "../..",
     "share/dbus-1/services",               "../../..",
     "share/gnome-shell/search-providers",  "../../..",
+    "share/krunner/dbusplugins",           "../../..",
     "share/mime/packages",                 "../../..",
     "share/metainfo",                      "../..",
     "bin",                                 "..",
@@ -8160,7 +8280,7 @@ extract_extra_data (FlatpakDir   *self,
           const guchar *data;
           gsize len;
 
-          g_variant_get_child (extra_data, j, "(^ay@ay)",
+          g_variant_get_child (extra_data, j, "(^&ay@ay)",
                                &extra_data_name,
                                &content);
 
@@ -8300,6 +8420,9 @@ apply_extra_data (FlatpakDir   *self,
     {
       /* We pass in self here so that we ensure that we find the runtime in case it only
          exists in this installation (which might be custom) */
+      /* TODO: This is a circular dependency between flatpak-dir (which
+       * deals with a single installation) and flatpak-dir-utils (which
+       * deals with all the installations on the system). */
       runtime_deploy = flatpak_find_deploy_for_ref (flatpak_decomposed_get_ref (runtime_ref), NULL, self, cancellable, error);
       if (runtime_deploy == NULL)
         return FALSE;
@@ -8360,7 +8483,7 @@ apply_extra_data (FlatpakDir   *self,
 
   flatpak_bwrap_envp_to_args (bwrap);
 
-  flatpak_bwrap_add_arg (bwrap, "/app/bin/apply_extra");
+  flatpak_bwrap_add_args (bwrap, "--", "/app/bin/apply_extra", NULL);
 
   flatpak_bwrap_finish (bwrap);
 
@@ -8443,7 +8566,7 @@ flatpak_dir_check_parental_controls (FlatpakDir    *self,
   gboolean authorized;
   gboolean repo_installation_allowed, app_is_appropriate;
   PolkitCheckAuthorizationFlags polkit_flags;
-  MctGetAppFilterFlags manager_flags;
+  MctManagerGetValueFlags manager_flags;
 
   /* Assume that root is allowed to install any ref and shouldn't have any
    * parental controls restrictions applied to them. Note that this branch
@@ -8497,13 +8620,13 @@ flatpak_dir_check_parental_controls (FlatpakDir    *self,
     }
 
   manager = mct_manager_new (dbus_connection);
-  manager_flags = MCT_GET_APP_FILTER_FLAGS_NONE;
+  manager_flags = MCT_MANAGER_GET_VALUE_FLAGS_NONE;
   if (!flatpak_dir_get_no_interaction (self))
-    manager_flags |= MCT_GET_APP_FILTER_FLAGS_INTERACTIVE;
+    manager_flags |= MCT_MANAGER_GET_VALUE_FLAGS_INTERACTIVE;
   app_filter = mct_manager_get_app_filter (manager, subject_uid,
                                            manager_flags,
                                            cancellable, &local_error);
-  if (g_error_matches (local_error, MCT_APP_FILTER_ERROR, MCT_APP_FILTER_ERROR_DISABLED))
+  if (g_error_matches (local_error, MCT_MANAGER_ERROR, MCT_MANAGER_ERROR_DISABLED))
     {
       g_info ("Skipping parental controls check for %s since parental "
               "controls are disabled globally", ref);
@@ -8887,7 +9010,7 @@ flatpak_dir_deploy (FlatpakDir          *self,
       files_etc = g_file_resolve_relative_path (checkoutdir, "files/etc");
       if (g_file_query_exists (files_etc, cancellable))
         {
-          char *etcfiles[] = {"passwd", "group", "machine-id" };
+          static const char * const etcfiles[] = {"passwd", "group", "machine-id" };
           g_autoptr(GFile) etc_resolve_conf = g_file_get_child (files_etc, "resolv.conf");
           int i;
           for (i = 0; i < G_N_ELEMENTS (etcfiles); i++)
@@ -11513,7 +11636,7 @@ flatpak_dir_get_if_deployed (FlatpakDir        *self,
     }
 
   if (g_file_query_file_type (deploy_dir, G_FILE_QUERY_INFO_NONE, cancellable) == G_FILE_TYPE_DIRECTORY)
-    return g_object_ref (deploy_dir);
+    return g_steal_pointer (&deploy_dir);
 
   /* Maybe it was removed but is still living? */
   if (checksum != NULL)
@@ -11527,7 +11650,7 @@ flatpak_dir_get_if_deployed (FlatpakDir        *self,
       removed_deploy_dir = g_file_get_child (removed_dir, dirname);
 
       if (g_file_query_file_type (removed_deploy_dir, G_FILE_QUERY_INFO_NONE, cancellable) == G_FILE_TYPE_DIRECTORY)
-        return g_object_ref (removed_deploy_dir);
+        return g_steal_pointer (&removed_deploy_dir);
     }
 
   return NULL;
@@ -11546,7 +11669,7 @@ flatpak_dir_get_unmaintained_extension_dir_if_exists (FlatpakDir   *self,
   extension_dir = flatpak_dir_get_unmaintained_extension_dir (self, name, arch, branch);
 
   extension_dir_info = g_file_query_info (extension_dir,
-                                          G_FILE_ATTRIBUTE_STANDARD_SYMLINK_TARGET,
+                                          G_FILE_ATTRIBUTE_STANDARD_SYMLINK_TARGET "," G_FILE_ATTRIBUTE_STANDARD_IS_SYMLINK,
                                           G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
                                           cancellable,
                                           NULL);
@@ -14434,6 +14557,7 @@ parse_ref_file (GKeyFile *keyfile,
   *url_out = NULL;
   *gpg_data_out = NULL;
   *is_runtime_out = FALSE;
+  *collection_id_out = NULL;
 
   if (!g_key_file_has_group (keyfile, FLATPAK_REF_GROUP))
     return flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA, _("Invalid file format, no %s group"), FLATPAK_REF_GROUP);
@@ -14645,8 +14769,7 @@ flatpak_dir_list_remotes (FlatpakDir   *self,
   if (res == NULL)
     res = g_new0 (char *, 1); /* Return empty array, not error */
 
-  g_qsort_with_data (res, g_strv_length (res), sizeof (char *),
-                     cmp_remote, self);
+  qsort_r (res, g_strv_length (res), sizeof (char *), cmp_remote, self);
 
   return res;
 }
@@ -15440,6 +15563,9 @@ add_related (FlatpakDir        *self,
     auto_prune = TRUE;
 
   /* Don't download if there is an unmaintained extension already installed */
+  /* TODO: This is a circular dependency between flatpak-dir (which
+   * deals with a single installation) and flatpak-dir-utils (which
+   * deals with all the installations on the system). */
   unmaintained_path =
     flatpak_find_unmaintained_extension_dir_if_exists (id, arch, branch, NULL);
   if (unmaintained_path != NULL && deploy_data == NULL)

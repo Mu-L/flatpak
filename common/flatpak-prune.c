@@ -34,6 +34,7 @@
 
 #include "flatpak-error.h"
 #include "flatpak-prune-private.h"
+#include "flatpak-variant-private.h"
 #include "flatpak-variant-impl-private.h"
 #include "libglnx.h"
 #include "valgrind-private.h"
@@ -381,10 +382,10 @@ flatpak_ostree_object_name_hash (gconstpointer a)
      those are the ones that will be first compared on a hash collision,
      so if they were always the same that would waste 4 comparisons. */
   return
-    data[32] |
-    data[31] << 8 |
-    data[30] << 16 |
-    data[29] << 24;
+    ((guint32) data[32]) |
+    ((guint32) data[31]) << 8 |
+    ((guint32) data[30]) << 16 |
+    ((guint32) data[29]) << 24;
 }
 
 static gboolean
@@ -775,6 +776,7 @@ flatpak_repo_prune (OstreeRepo    *repo,
 
     g_timer_stop (timer);
     g_info ("Elapsed time: %.1f sec",  g_timer_elapsed (timer, NULL));
+    g_clear_pointer (&timer, g_timer_destroy);
   }
 
   {
@@ -798,14 +800,17 @@ flatpak_repo_prune (OstreeRepo    *repo,
     g_timer_stop (timer);
     g_info ("Elapsed time: %.1f sec",  g_timer_elapsed (timer, NULL));
 
-    g_info ("Pruning unreachable objects");
-    g_timer_start (timer);
+    if (!dry_run)
+      {
+        g_info ("Pruning unreachable objects");
+        g_timer_start (timer);
 
-    if (!prune_unreachable_loose_objects (repo, &data, cancellable, error))
-      return FALSE;
+        if (!prune_unreachable_loose_objects (repo, &data, cancellable, error))
+          return FALSE;
 
-    g_timer_stop (timer);
-    g_info ("Elapsed time: %.1f sec",  g_timer_elapsed (timer, NULL));
+        g_timer_stop (timer);
+        g_info ("Elapsed time: %.1f sec",  g_timer_elapsed (timer, NULL));
+      }
   }
 
   /* Prune static deltas outside lock to avoid conflict with its exclusive lock */

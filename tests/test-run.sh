@@ -24,7 +24,7 @@ set -euo pipefail
 skip_without_bwrap
 skip_revokefs_without_fuse
 
-echo "1..20"
+echo "1..26"
 
 # Use stable rather than master as the branch so we can test that the run
 # command automatically finds the branch correctly
@@ -50,6 +50,8 @@ assert_has_file $FL_DIR/exports/share/metainfo/org.test.Hello.cmd.appdata.xml
 assert_file_has_content $FL_DIR/exports/share/applications/org.test.Hello.desktop "^Exec=.*flatpak run --branch=stable --arch=$ARCH --command=hello\.sh org\.test\.Hello$"
 assert_has_file $FL_DIR/exports/share/gnome-shell/search-providers/org.test.Hello.search-provider.ini
 assert_file_has_content $FL_DIR/exports/share/gnome-shell/search-providers/org.test.Hello.search-provider.ini "^DefaultDisabled=true$"
+assert_has_file $FL_DIR/exports/share/krunner/dbusplugins/org.test.Hello.desktop
+assert_file_has_content $FL_DIR/exports/share/krunner/dbusplugins/org.test.Hello.desktop "^X-KDE-PluginInfo-EnabledByDefault=false$"
 assert_has_file $FL_DIR/exports/share/icons/hicolor/64x64/apps/org.test.Hello.png
 assert_not_has_file $FL_DIR/exports/share/icons/hicolor/64x64/apps/dont-export.png
 assert_has_file $FL_DIR/exports/share/icons/HighContrast/64x64/apps/org.test.Hello.png
@@ -75,6 +77,22 @@ run org.test.Hello &> hello_out
 assert_file_has_content hello_out '^Hello world, from a sandbox$'
 
 ok "hello"
+
+# This should try and fail to run e.g. /usr/bin/--tmpfs, which will
+# exit with a nonzero status because there is no such executable.
+# It should not pass "--tmpfs /blah hello.sh" as bwrap options.
+exit_status=0
+run --command=--tmpfs org.test.Hello /blah hello.sh >&2 || exit_status=$?
+assert_not_streq "$exit_status" 0
+
+ok "avoided CVE-2024-32462"
+
+true > value-in-sandbox
+head value-in-sandbox >&2
+run_sh org.test.Hello 'echo fd passthrough >&5' 5>value-in-sandbox
+assert_file_has_content value-in-sandbox '^fd passthrough$'
+
+ok "redirected fds can pass through to the app"
 
 # XDG_RUNTIME_DIR is set to <temp directory>/runtime by libtest.sh,
 # so we always have the necessary setup to reproduce #4372
@@ -543,3 +561,42 @@ ${FLATPAK} ${U} info -m org.test.App > out
 assert_file_has_content out "^sdk=org\.test\.Sdk/$(flatpak --default-arch)/stable$"
 
 ok "--sdk option"
+
+rm -fr "$HOME/.var/app/org.test.Hello"
+mkdir -p "$HOME/.var/app/org.test.Hello"
+run --command=sh --persist=.persist org.test.Hello -c 'echo can-persist > .persist/rc'
+sed -e 's,^,#--persist=.persist# ,g' < "$HOME/.var/app/org.test.Hello/.persist/rc" >&2
+assert_file_has_content "$HOME/.var/app/org.test.Hello/.persist/rc" "can-persist"
+
+ok "--persist=.persist persists a directory"
+
+rm -fr "$HOME/.var/app/org.test.Hello"
+mkdir -p "$HOME/.var/app/org.test.Hello"
+# G_DEBUG='' to avoid the deprecation warning being fatal
+G_DEBUG='' run --command=sh --persist=/.persist org.test.Hello -c 'echo can-persist > .persist/rc'
+sed -e 's,^,#--persist=/.persist# ,g' < "$HOME/.var/app/org.test.Hello/.persist/rc" >&2
+assert_file_has_content "$HOME/.var/app/org.test.Hello/.persist/rc" "can-persist"
+
+ok "--persist=/.persist is a deprecated form of --persist=.persist"
+
+rm -fr "$HOME/.var/app/org.test.Hello"
+mkdir -p "$HOME/.var/app/org.test.Hello"
+run --command=sh --persist=. org.test.Hello -c 'echo can-persist > .persistrc'
+sed -e 's,^,#--persist=.# ,g' < "$HOME/.var/app/org.test.Hello/.persistrc" >&2
+assert_file_has_content "$HOME/.var/app/org.test.Hello/.persistrc" "can-persist"
+
+ok "--persist=. persists all files"
+
+mkdir "${TEST_DATA_DIR}/inaccessible"
+echo FOO > ${TEST_DATA_DIR}/inaccessible/secret-file
+rm -fr "$HOME/.var/app/org.test.Hello"
+mkdir -p "$HOME/.var/app/org.test.Hello"
+ln -fns "${TEST_DATA_DIR}/inaccessible" "$HOME/.var/app/org.test.Hello/persist"
+# G_DEBUG='' to avoid the warnings being fatal when we reject a --persist option.
+# LC_ALL=C so we get the expected non-localized string.
+LC_ALL=C G_DEBUG='' run --command=ls --persist=persist --persist=relative/../escape org.test.Hello -la ~/persist &> hello_out || true
+sed -e 's,^,#--persist=symlink# ,g' < hello_out >&2
+assert_file_has_content hello_out "not allowed to avoid sandbox escape"
+assert_not_file_has_content hello_out "secret-file"
+
+ok "--persist doesn't allow sandbox escape via a symlink (CVE-2024-42472)"

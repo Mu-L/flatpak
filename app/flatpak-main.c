@@ -367,6 +367,8 @@ flatpak_option_context_parse (GOptionContext     *context,
 
       if (opt_verbose > 0 || opt_ostree_verbose)
         flatpak_disable_fancy_output ();
+
+      flatpak_set_debugging (opt_verbose > 1);
     }
 
   /* sudo flatpak --user ... would operate on the root user's installation,
@@ -679,7 +681,7 @@ flatpak_run (int      argc,
 
   if (!command->fn)
     {
-      GOptionContext *context;
+      g_autoptr(GOptionContext) context = NULL;
       g_autofree char *hint = NULL;
       g_autofree char *msg = NULL;
 
@@ -711,13 +713,13 @@ flatpak_run (int      argc,
               if (opt_version)
                 {
                   g_print ("%s\n", PACKAGE_STRING);
-                  exit (EXIT_SUCCESS);
+                  return EXIT_SUCCESS;
                 }
 
               if (opt_default_arch)
                 {
                   g_print ("%s\n", flatpak_get_arch ());
-                  exit (EXIT_SUCCESS);
+                  return EXIT_SUCCESS;
                 }
 
               if (opt_supported_arches)
@@ -726,7 +728,7 @@ flatpak_run (int      argc,
                   int i;
                   for (i = 0; arches[i] != NULL; i++)
                     g_print ("%s\n", arches[i]);
-                  exit (EXIT_SUCCESS);
+                  return EXIT_SUCCESS;
                 }
 
               if (opt_gl_drivers)
@@ -735,7 +737,7 @@ flatpak_run (int      argc,
                   int i;
                   for (i = 0; drivers[i] != NULL; i++)
                     g_print ("%s\n", drivers[i]);
-                  exit (EXIT_SUCCESS);
+                  return EXIT_SUCCESS;
                 }
 
               if (opt_list_installations)
@@ -751,7 +753,7 @@ flatpak_run (int      argc,
                           GFile *file = paths->pdata[i];
                           g_print ("%s\n", flatpak_file_get_path_cached (file));
                         }
-                      exit (EXIT_SUCCESS);
+                      return EXIT_SUCCESS;
                     }
                 }
 
@@ -777,7 +779,7 @@ flatpak_run (int      argc,
                   if (local_error != NULL)
                     {
                       g_printerr ("%s\n", local_error->message);
-                      exit (1);
+                      return 1;
                     }
 
                   for (gsize i = 0; i < system_installation_locations->len; i++)
@@ -805,7 +807,7 @@ flatpak_run (int      argc,
                   new_dirs_joined = g_strjoinv (":", (gchar **) new_dirs->pdata);
                   g_print ("XDG_DATA_DIRS=%s\n", new_dirs_joined);
 
-                  exit (EXIT_SUCCESS);
+                  return EXIT_SUCCESS;
                 }
             }
 
@@ -814,8 +816,6 @@ flatpak_run (int      argc,
           else
             msg = g_strdup (_("No command specified"));
         }
-
-      g_option_context_free (context);
 
       g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s\n\n%s", msg, hint);
 

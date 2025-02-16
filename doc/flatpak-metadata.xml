@@ -152,7 +152,7 @@
                     <listitem><para>
                         List of well-known sockets to make available in the sandbox.
                         Possible sockets: x11, wayland, fallback-x11, pulseaudio, session-bus, system-bus,
-                        ssh-auth, pcsc, cups.
+                        ssh-auth, pcsc, cups, gpg-agent, inherit-wayland-socket.
                         When making a socket available, flatpak also sets
                         well-known environment variables like DISPLAY or
                         DBUS_SYSTEM_BUS_ADDRESS to let the application
@@ -164,7 +164,9 @@
                 <varlistentry>
                     <term><option>devices</option> (list)</term>
                     <listitem><para>
-                        List of devices to make available in the sandbox.
+                        List of devices to make available in the sandbox. This
+                        just expose the devices nodes, it doesn't grant any
+                        permission that the user doesn't already have.
                         Possible values:
                         <variablelist>
 
@@ -179,6 +181,15 @@
                             <listitem><para>
                                 Input devices
                                 (<filename>/dev/input</filename>).
+                                Available since 1.15.6.
+                            </para></listitem></varlistentry>
+
+                            <varlistentry><term><option>usb</option></term>
+                            <listitem><para>
+                                USB device bus
+                                (all device nodes below
+                                <filename>/dev/bus/usb</filename>).
+                                Available since 1.15.11.
                             </para></listitem></varlistentry>
 
                             <varlistentry><term><option>kvm</option></term>
@@ -549,15 +560,13 @@
                         The absolute path on the host system of the app's
                         app files, as mounted at <filename>/app</filename>
                         inside the container. Available since 0.6.10.
-                    </para></listitem>
-                    <listitem><para>
+                    </para><para>
                         Since 1.12.0, if <command>flatpak run</command>
                         was run with the <option>--app-path</option> option,
                         this key gives the absolute path of whatever files
                         were mounted on <filename>/app</filename>, even if
                         that differs from the app's normal app files.
-                    </para></listitem>
-                    <listitem><para>
+                    </para><para>
                         If <command>flatpak run</command> was run with
                         <option>--app-path=</option> (resulting in an
                         empty directory being mounted on
@@ -573,8 +582,7 @@
                         the absolute path of the app's original files,
                         as mounted at <filename>/run/parent/app</filename>
                         inside the container. Available since 1.12.0.
-                    </para></listitem>
-                    <listitem><para>
+                    </para><para>
                         If this key is missing, the app files are given
                         by <option>app-path</option>.
                     </para></listitem>
@@ -627,8 +635,7 @@
                         The absolute path on the host system of the app's
                         runtime files, as mounted at <filename>/usr</filename>
                         inside the container. Available since 0.6.10.
-                    </para></listitem>
-                    <listitem><para>
+                    </para><para>
                         Since 1.12.0, if <command>flatpak run</command>
                         was run with the <option>--usr-path</option> option,
                         this key gives the absolute path of whatever files
@@ -644,8 +651,7 @@
                         the absolute path of the app's original runtime,
                         as mounted at <filename>/run/parent/usr</filename>
                         inside the container. Available since 1.12.0.
-                    </para></listitem>
-                    <listitem><para>
+                    </para><para>
                         If this key is missing, the runtime files are given
                         by <option>runtime-path</option>.
                     </para></listitem>
@@ -883,40 +889,40 @@
                         <variablelist>
                             <varlistentry>
                                 <term><option>active-gl-driver</option></term>
-                                <para>
+                                <listitem><para>
                                     Is true if the name of the active GL driver matches the
                                     extension point basename. Available since 0.9.1, and backported to
                                     the 0.8.x branch in 0.8.3.
-                                </para>
+                                </para></listitem>
                             </varlistentry>
                             <varlistentry>
                                 <term><option>active-gtk-theme</option></term>
-                                <para>
+                                <listitem><para>
                                     Is true if the name of the current GTK theme
                                     (via org.gnome.desktop.interface GSetting) matches the extension point
                                     basename. Added 0.10.1.
-                                </para>
+                                </para></listitem>
                             </varlistentry>
                             <varlistentry>
                                 <term><option>have-intel-gpu</option></term>
-                                <para>Is true if the i915 kernel module is loaded. Added 0.10.1.</para>
+                                <listitem><para>Is true if the i915 kernel module is loaded. Added 0.10.1.</para></listitem>
                             </varlistentry>
                             <varlistentry>
                                 <term><option>have-kernel-module-*</option></term>
-                                <para>
+                                <listitem><para>
                                     Is true if the suffix (case-sensitive) is found in <literal>/proc/modules</literal>.
                                     For example <literal>have-kernel-module-nvidia</literal>.
                                     Added 1.13.1.
-                                </para>
+                                </para></listitem>
                             </varlistentry>
                             <varlistentry>
                                 <term><option>on-xdg-desktop-*</option></term>
-                                <para>
+                                <listitem><para>
                                     Is true if the suffix (case-insensitively) is in the
                                     <literal>XDG_CURRENT_DESKTOP</literal> env var.
                                     For example <literal>on-xdg-desktop-GNOME-classic</literal>.
                                     Added 1.1.1.
-                                </para>
+                                </para></listitem>
                             </varlistentry>
                         </variablelist>
                     </listitem>
@@ -1094,6 +1100,36 @@
             <!-- TODO: More information would be nice -->
           </para>
         </refsect2>
+        <refsect2 id="usb-devices">
+          <title>[USB Devices]</title>
+          <para>
+            USB devices can be enumerable or hidden by the USB portal as specified
+            by the keys in this group. The vendor and product ids are validated
+            by Flatpak, but aren't otherwise used or parsed.
+            This merely grant the permission to enumerate USB device for use by the
+            portal. This does give access to the devices.
+            Available since 1.15.11.
+          </para>
+          <variablelist>
+                <varlistentry>
+                    <term><option>enumerable-devices</option> (string list)</term>
+                    <listitem><para>
+                        List of enumerable USB devices. Each element is the same
+                        syntax the arguments to `--usb`.
+                        Available since 1.15.11.
+                    </para></listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term><option>hidden-devices</option> (string list)</term>
+                    <listitem><para>
+                        List of hidden USB devices, i.e. to remove the enumarable
+                        devices list. Each element is the same syntax the arguments
+                        to `--nousb`. Hidden devices take precedence over enumerable
+                        devices. Available since 1.15.11.
+                    </para></listitem>
+                </varlistentry>
+            </variablelist>
+        </refsect2>
     </refsect1>
 
     <refsect1>
@@ -1115,6 +1151,10 @@ ca.desrt.dconf=talk
 
 [Environment]
 DCONF_USER_CONFIG_DIR=.config/dconf
+
+[USB Devices]
+enumerable-devices=0fd9:*;
+hidden-devices=0fd9:0063;
 
 [Extension org.gnome.Calculator.Locale]
 directory=share/runtime/locale

@@ -32,6 +32,7 @@
 
 #include "flatpak-builtins.h"
 #include "flatpak-context-private.h"
+#include "flatpak-dir-private.h"
 #include "flatpak-utils-private.h"
 #include "flatpak-run-private.h"
 
@@ -235,6 +236,7 @@ collect_exports (GFile          *base,
     "share/icons",                        /* Icons */
     "share/dbus-1/services",              /* D-Bus service files */
     "share/gnome-shell/search-providers", /* Search providers */
+    "share/krunner/dbusplugins",          /* KDE krunner DBus plugins */
     "share/appdata",                      /* Copy appdata/metainfo files (legacy path) */
     "share/metainfo",                     /* Copy appdata/metainfo files */
     NULL,
@@ -259,8 +261,8 @@ collect_exports (GFile          *base,
       g_auto(GStrv) allowed_extensions = NULL;
       gboolean require_exact_match = FALSE;
 
-      if (!flatpak_get_allowed_exports (path, app_id, arg_context,
-                                        &allowed_extensions, &allowed_prefixes, &require_exact_match))
+      if (!flatpak_context_get_allowed_exports (arg_context, path, app_id,
+                                                &allowed_extensions, &allowed_prefixes, &require_exact_match))
         return flatpak_fail (error, "Unexpectedly not allowed to export %s", path);
 
       if (g_file_query_exists (src, cancellable))
